@@ -1,12 +1,12 @@
 # MAXDOP
 
-Scripts to inventory SQL Server parallelism settings, extract Query Store CPU-heavy queries, run repeatable per-query MAXDOP tests, and optionally capture host PerfMon counters during baseline windows.
+Scripts to inventory SQL Server parallelism settings, extract Query Store CPU-heavy queries, run repeatable per-query MAXDOP tests, and capture optional host PerfMon counters during baseline windows.
 
 ## Files
 
 - `1.Inventory.sql`
   - Captures server/instance metadata and current parallelism settings.
-  - Returns CPU, scheduler, and NUMA topology details used to scope MAXDOP decisions.
+  - Returns CPU, scheduler, and NUMA topology details to scope MAXDOP decisions.
 
 - `2.QueryStoreExtract.sql`
   - Retrieves top Query Store plans by average CPU time for a target database.
@@ -34,12 +34,38 @@ Scripts to inventory SQL Server parallelism settings, extract Query Store CPU-he
 - Local administrator rights (required for `logman create/start/stop/delete`)
 - SQL Server host access (run directly on the SQL Server VM/host)
 
-## Suggested Workflow
+## Usage
 
-1. Run `1.Inventory.sql` in `master` to baseline instance settings and CPU/NUMA topology.
-2. Run `2.QueryStoreExtract.sql` in each target database to identify CPU-expensive candidates.
-3. For each candidate, set query text in `3.PerQueryTestHarness.sql` and run controlled tests.
-4. Optionally run `PerfmonSQLStats.ps1` during baseline and test windows for host-side correlation.
+### 1) Inventory instance settings and topology
+
+Run `1.Inventory.sql` in `master` using SSMS, Azure Data Studio, or sqlcmd.
+
+```sql
+:r .\1.Inventory.sql
+```
+
+### 2) Extract high CPU Query Store candidates
+
+Edit `2.QueryStoreExtract.sql` and replace `USE [YourDatabase]`, then run in each target database.
+
+```sql
+:r .\2.QueryStoreExtract.sql
+```
+
+### 3) Execute per-query MAXDOP test harness
+
+Edit `3.PerQueryTestHarness.sql` and replace `@sql` with the exact query text to test.
+
+```sql
+:r .\3.PerQueryTestHarness.sql
+```
+
+### 4) Optional PerfMon capture on SQL host
+
+```powershell
+cd SQLDatabase/MAXDOP
+./PerfmonSQLStats.ps1
+```
 
 ## Notes
 
