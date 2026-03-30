@@ -6,6 +6,8 @@ Collection of Azure snippets organized by service area.
 
 - [AzureDataFactory](AzureDataFactory/README.md)
   - Azure Data Factory snippet collection.
+- [SQLDatabase](SQLDatabase/README.md)
+  - SQL Database tuning and diagnostics snippets.
 
 ## License
 
