@@ -6,6 +6,8 @@ Collection of SQL Server and Azure SQL oriented snippets for inventory, performa
 
 - [MAXDOP](MAXDOP/README.md)
   - Scripts for baseline collection and per-query MAXDOP testing.
+- [SQLProjects](SQLProjects/README.md)
+  - Example SQL Database Project with CI/CD-oriented post-deployment test scripts.
 
 ## Notes
 

@@ -1,0 +1,5 @@
+CREATE TABLE [dbo].[DemoTable]
+(
+  [Id] INT NOT NULL PRIMARY KEY IDENTITY,
+  [Forename] VARCHAR (255) NOT NULL
+)

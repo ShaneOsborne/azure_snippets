@@ -1,0 +1,19 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Problems>
+  <Problem>
+    <Rule>Microsoft.Rules.Data.SR0001</Rule>
+    <ProblemDescription>The shape of the result set produced by a SELECT * statement will change if the underlying table or view structure changes.</ProblemDescription>
+    <SourceFile>C:\src\ShaneOsborne\azure_snippets\SQLDatabase\SQLProjects\CICDSQLProjectDemo\dbo\Views\vwDemoTable.sql</SourceFile>
+    <Line>2</Line>
+    <Column>13</Column>
+    <Severity>Warning</Severity>
+  </Problem>
+  <Problem>
+    <Rule>Microsoft.Rules.Data.SR0005</Rule>
+    <ProblemDescription>Avoid using patterns that start with "%" in LIKE predicates</ProblemDescription>
+    <SourceFile>C:\src\ShaneOsborne\azure_snippets\SQLDatabase\SQLProjects\CICDSQLProjectDemo\dbo\Views\vwDemoTable.sql</SourceFile>
+    <Line>3</Line>
+    <Column>23</Column>
+    <Severity>Warning</Severity>
+  </Problem>
+</Problems>

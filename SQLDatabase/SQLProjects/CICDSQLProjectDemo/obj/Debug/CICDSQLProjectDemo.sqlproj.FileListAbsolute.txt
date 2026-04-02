@@ -1,0 +1,5 @@
+C:\src\ShaneOsborne\azure_snippets\SQLDatabase\SQLProjects\CICDSQLProjectDemo\bin\Debug\CICDSQLProjectDemo.dacpac
+c:\src\ShaneOsborne\azure_snippets\SQLDatabase\SQLProjects\CICDSQLProjectDemo\obj\Debug\Model.xml
+c:\src\ShaneOsborne\azure_snippets\SQLDatabase\SQLProjects\CICDSQLProjectDemo\obj\Debug\refactor.xml
+c:\src\ShaneOsborne\azure_snippets\SQLDatabase\SQLProjects\CICDSQLProjectDemo\obj\Debug\postdeploy.sql
+c:\src\ShaneOsborne\azure_snippets\SQLDatabase\SQLProjects\CICDSQLProjectDemo\obj\Debug\predeploy.sql
