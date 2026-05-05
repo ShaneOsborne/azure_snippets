@@ -6,52 +6,60 @@ Scripts to inventory Azure Data Factory linked services and identify cases where
 
 - `Get-AdfTrustedBypassRiskReport.ps1`
   - Generates a full risk report CSV from Azure Resource Graph and ADF REST APIs.
+  - Defaults to Azure CLI authentication, so it uses the account from `az login`.
   - Default output: `adf_risk_report_v3_pwsh.csv`
 
 - `Get-AffectedServices.ps1`
   - Filters the full risk report to only rows considered affected.
   - Default output: `adf_risk_report_AFFECTED_ONLY.csv`
-
-- `ADF_affected_services.sh`
-  - Bash/Azure CLI implementation of the inventory workflow.
-  - Output: `adf_risk_report_v3.csv`
+  - Also writes a row-by-row filter explanation CSV by default.
+  - Default explanation output: `adf_risk_report_FILTER_EXPLANATION.csv`
 
 ## Prerequisites
 
-### PowerShell scripts
-
 - PowerShell 7+
-- Az modules:
-  - `Az.Accounts`
-  - `Az.ResourceGraph`
+- Azure CLI (`az`) logged in
 - Access to the target subscriptions
 
-Install if needed:
+Log in with Azure CLI:
 
 ```powershell
-Install-Module Az.Accounts -Scope CurrentUser
-Install-Module Az.ResourceGraph -Scope CurrentUser
+az login --use-device-code
+az account set --subscription "<subscription-id>"
 ```
 
-### Bash script
+`Get-AdfTrustedBypassRiskReport.ps1` defaults to `-AuthMode AzureCli`. This intentionally uses Azure CLI's login cache, not Az PowerShell context.
 
-- Bash environment (Cloud Shell, WSL, Linux, macOS)
-- Azure CLI (`az`) logged in
-- `jq`
+Optional Az PowerShell compatibility mode requires:
+
+- `Az.Accounts`
+- `Az.ResourceGraph`
+
+Install those only if you plan to run with `-AuthMode AzPowerShell`:
+
+```powershell
+Install-Module Az.Accounts, Az.ResourceGraph -Scope CurrentUser -Repository PSGallery -AllowClobber
+```
 
 ## Usage
 
-### 1) Build full report (PowerShell)
+### 1) Build Full Report
 
 ```powershell
 cd AzureDataFactory/ManagedFirewallTrustedServices
-./Get-AdfTrustedBypassRiskReport.ps1
+az login --use-device-code
+az account set --subscription "00000000-0000-0000-0000-000000000000"
+./Get-AdfTrustedBypassRiskReport.ps1 -SubscriptionId "00000000-0000-0000-0000-000000000000"
 ```
 
-Optional single-subscription run:
+The PowerShell report script uses Azure CLI auth by default. It prints the Azure CLI account, tenant, and subscription before scanning.
+
+Optional tenant check:
 
 ```powershell
-./Get-AdfTrustedBypassRiskReport.ps1 -SubscriptionId "00000000-0000-0000-0000-000000000000"
+./Get-AdfTrustedBypassRiskReport.ps1 `
+  -SubscriptionId "00000000-0000-0000-0000-000000000000" `
+  -TenantId "11111111-1111-1111-1111-111111111111"
 ```
 
 Optional output path:
@@ -60,10 +68,35 @@ Optional output path:
 ./Get-AdfTrustedBypassRiskReport.ps1 -OutputPath "./adf_risk_report_custom.csv"
 ```
 
-### 2) Filter to affected services (PowerShell)
+Optional Az PowerShell mode:
+
+```powershell
+./Get-AdfTrustedBypassRiskReport.ps1 `
+  -SubscriptionId "00000000-0000-0000-0000-000000000000" `
+  -TenantId "11111111-1111-1111-1111-111111111111" `
+  -AuthMode AzPowerShell
+```
+
+### 2) Filter To Affected Services
 
 ```powershell
 ./Get-AffectedServices.ps1
+```
+
+This writes:
+
+- `adf_risk_report_AFFECTED_ONLY.csv`
+- `adf_risk_report_FILTER_EXPLANATION.csv`
+
+The affected-only filter requires both:
+
+- `trustedBypassEffective = Y`
+- `scenarioCategory` matches one of `SHIR`, `AzureSSIS`, `REST_LinkedService`, `Web_ActivityOrLS`, or `AzureFunction_ActivityOrLS`
+
+If no affected rows are found, the script prints a friendly table explaining why each input row was excluded. To hide that console table:
+
+```powershell
+./Get-AffectedServices.ps1 -HideExplanations
 ```
 
 Custom input and output:
@@ -72,17 +105,16 @@ Custom input and output:
 ./Get-AffectedServices.ps1 -InputPath "./adf_risk_report_v3_pwsh.csv" -OutputPath "./adf_risk_report_AFFECTED_ONLY.csv"
 ```
 
-### 3) Bash alternative
+Custom explanation output:
 
-```bash
-cd AzureDataFactory/ManagedFirewallTrustedServices
-bash ADF_affected_services.sh <subscription-id>
+```powershell
+./Get-AffectedServices.ps1 -ExplanationPath "./filter_explanation.csv"
 ```
-
-If no subscription ID is provided, the script uses the currently selected Azure CLI account subscription.
 
 ## Notes
 
 - Target URI extraction from linked services is best-effort.
 - Parameterized linked services or connectors without explicit URI fields may not fully classify target type.
+- Azure CLI and Az PowerShell maintain separate login/context caches. The default PowerShell report mode uses Azure CLI context.
+- If a CSV cannot be overwritten, close it in Excel, VS Code, or any other app that may have locked the file.
 - Confirm findings against your environment and security requirements before remediation.
