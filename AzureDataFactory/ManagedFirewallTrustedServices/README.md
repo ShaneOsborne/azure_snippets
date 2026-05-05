@@ -1,19 +1,114 @@
 # ManagedFirewallTrustedServices
 
-Scripts to inventory Azure Data Factory linked services and identify cases where Trusted Microsoft Services bypass settings may still be effectively active for Storage or Key Vault targets.
+Scripts to inventory Azure Data Factory linked services and identify candidate impact for the Azure Data Factory managed identity + Trusted Microsoft Services firewall bypass retirement scenario.
+
+This is a two-stage workflow:
+
+- Stage 1, `Get-AdfTrustedBypassRiskReport.ps1`, builds a broad discovery/risk report.
+- Stage 2, `Get-AffectedServices.ps1`, reduces the broad report into a narrower likely affected/manual-review set.
+
+These scripts are designed to support investigation. They do not prove final impact because pipeline/activity inspection and connector-specific runtime behavior may still need validation.
 
 ## Files
 
 - `Get-AdfTrustedBypassRiskReport.ps1`
-  - Generates a full risk report CSV from Azure Resource Graph and ADF REST APIs.
+  - Generates a broad risk report CSV from Azure Resource Graph and ADF REST APIs.
   - Defaults to Azure CLI authentication, so it uses the account from `az login`.
   - Default output: `adf_risk_report_v3_pwsh.csv`
 
 - `Get-AffectedServices.ps1`
-  - Filters the full risk report to only rows considered affected.
+  - Filters the full risk report to likely affected or manual-review rows.
   - Default output: `adf_risk_report_AFFECTED_ONLY.csv`
   - Also writes a row-by-row filter explanation CSV by default.
   - Default explanation output: `adf_risk_report_FILTER_EXPLANATION.csv`
+
+## Stage 1 Risk Report Logic
+
+`Get-AdfTrustedBypassRiskReport.ps1` inventories:
+
+- Storage accounts:
+  `networkAcls.bypass`, `networkAcls.defaultAction`, `publicNetworkAccess`
+- Key Vaults:
+  `networkAcls.bypass`, `networkAcls.defaultAction`, `publicNetworkAccess`
+- Data Factories:
+  identity type and user-assigned identity presence
+- ADF linked services and integration runtimes through ADF REST APIs
+
+The report correlates linked service target fields such as `url`, `baseUrl`, and `serviceEndpoint` to Storage or Key Vault resources when they are directly available. Parameterized linked services are flagged rather than resolved.
+
+Important output fields include:
+
+- `factoryIdentityType`
+- `factoryHasSystemAssignedMI`
+- `factoryHasUserAssignedMI`
+- `usesManagedIdentity`
+- `connectViaIRClass`
+- `targetDetectionStatus`
+- `targetKind`
+- `trustedBypassConfigured`
+- `trustedBypassEffective`
+- `riskLevel`
+- `reasonCodes`
+
+Stage 1 `riskLevel` is deliberately conservative:
+
+- `High`: Storage/KeyVault target + trusted bypass effective + managed identity evidence.
+- `Medium`: Storage/KeyVault target + trusted bypass effective, but MI evidence is incomplete.
+- `Low`: broader candidate signal or incomplete evidence.
+
+`trustedBypassEffective = Y` means the target resource was matched and the report saw:
+
+- bypass includes `AzureServices`
+- public network access is not disabled
+- default network action is `Deny`
+
+`targetDetectionStatus` helps explain target URI quality:
+
+- `Direct`: a URL-like field was found directly in the linked service.
+- `Parameterized`: the target appears expression-based or parameterized.
+- `NotFound`: no supported target URI field was found.
+- `Unknown`: type properties were not available.
+
+## Stage 2 Filtering Logic
+
+`Get-AffectedServices.ps1` is a reducer over the Stage 1 CSV. It does not query Azure, inspect pipelines, or inspect activities.
+
+The reducer keeps rows when they have enough evidence for likely impact or manual review. The main signals are:
+
+- target is `Storage` or `KeyVault`
+- `trustedBypassEffective = Y`
+- `usesManagedIdentity = Y`
+- `factoryHasSystemAssignedMI = Y`
+- `connectViaIRClass` is `SelfHosted` or `AzureSSIS`
+- `linkedServiceType` is REST/Web/AzureFunction-like
+- Storage/Key Vault connector types where MI evidence is incomplete but bypass evidence is strong
+
+User-assigned managed identity is treated as weaker evidence than system-assigned managed identity for this scenario. If `factoryHasUserAssignedMI = Y` but system-assigned evidence is absent, the row can still be retained, but confidence is lowered unless other scenario signals justify it.
+
+### affectedConfidence
+
+The affected-only output includes `affectedConfidence`:
+
+- `High`: Storage/KeyVault target + trusted bypass effective + linked service MI evidence, plus at least one strong factory/IR/scenario signal.
+- `Medium`: Storage/KeyVault target + trusted bypass effective, but linked service MI evidence is missing, negative, or uncertain while other relevance signals remain.
+- `Low`: Storage/KeyVault target with trusted bypass configured/effective and enough scenario or identity evidence to warrant manual review, but not enough for Medium.
+
+The output also includes `filterReasonCodes`, a semicolon-separated explanation for why the row was retained. Common codes include:
+
+- `TrustedBypassEffective`
+- `TrustedBypassConfigured`
+- `UsesManagedIdentity`
+- `FactoryHasSystemAssignedMI`
+- `FactoryHasUserAssignedMI`
+- `UsesSHIR`
+- `UsesAzureSSIS`
+- `RESTScenario`
+- `WebLikeScenario`
+- `AzureFunctionLikeScenario`
+- `StorageOrKeyVaultConnector`
+- `MissingMIEvidenceButScenarioRelevant`
+- `UserAssignedMINotStrongEvidence`
+- `NeedsManualReview`
 
 ## Prerequisites
 
@@ -87,7 +182,7 @@ To pin Az PowerShell mode to a specific account:
   -AuthMode AzPowerShell
 ```
 
-### 2) Filter To Affected Services
+### 2) Filter To Likely Affected / Manual Review Rows
 
 ```powershell
 ./Get-AffectedServices.ps1
@@ -98,10 +193,7 @@ This writes:
 - `adf_risk_report_AFFECTED_ONLY.csv`
 - `adf_risk_report_FILTER_EXPLANATION.csv`
 
-The affected-only filter requires both:
-
-- `trustedBypassEffective = Y`
-- `scenarioCategory` matches one of `SHIR`, `AzureSSIS`, `REST_LinkedService`, `Web_ActivityOrLS`, or `AzureFunction_ActivityOrLS`
+The affected-only filter is now confidence-based. It prioritizes Storage/KeyVault targets where trusted bypass is effective and managed identity or scenario evidence is present. Rows with incomplete MI evidence can still be retained as Medium or Low confidence for manual validation.
 
 If no affected rows are found, the script prints a friendly table explaining why each input row was excluded. To hide that console table:
 

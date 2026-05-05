@@ -1,18 +1,42 @@
 <#
 .SYNOPSIS
-  Produces an ADF security advisory risk report across one subscription or all accessible subscriptions.
+  Produces a broad ADF managed identity + trusted services bypass candidate risk report.
 
 .DESCRIPTION
+  Stage 1 discovery script for the Azure Data Factory managed identity + trusted services
+  firewall bypass retirement scenario. This script intentionally produces a broad candidate
+  report, not a definitive affected-services list.
+
   - Uses Azure Resource Graph to inventory:
       * Storage accounts: networkAcls.bypass, networkAcls.defaultAction, publicNetworkAccess
       * Key Vaults:      networkAcls.bypass, networkAcls.defaultAction, publicNetworkAccess
-      * Data Factories
+      * Data Factories: identity.type and user-assigned identity presence
     Default AuthMode uses Azure CLI and the Resource Graph REST endpoint.
     AzPowerShell mode uses Search-AzGraph.
 
   - Uses Azure Data Factory REST APIs:
       * Linked Services - List By Factory (api-version 2018-06-01) 
       * Integration Runtimes - List By Factory (api-version 2018-06-01) [3](https://learn.microsoft.com/en-us/rest/api/datafactory/integration-runtimes/list-by-factory?view=rest-datafactory-2018-06-01)
+    ADF list operations follow nextLink pagination.
+
+  - Correlates linked service URL/baseUrl/serviceEndpoint values with Storage and Key Vault
+    firewall settings where the target URI can be directly derived.
+
+  - Adds candidate evidence fields:
+      * factoryIdentityType, factoryHasSystemAssignedMI, factoryHasUserAssignedMI
+      * usesManagedIdentity, derived best-effort from linked service authenticationType
+      * targetDetectionStatus: Direct, Parameterized, NotFound, or Unknown
+      * trustedBypassConfigured and trustedBypassEffective
+      * riskLevel and reasonCodes
+
+  riskLevel is conservative:
+      * High: Storage/KeyVault target + trusted bypass effective + managed identity evidence
+      * Medium: Storage/KeyVault target + trusted bypass effective, but MI evidence is incomplete
+      * Low: broader candidate signal or incomplete evidence
+
+  Parameterized targets, REST/Web/AzureFunction-style linked service signals, and IR patterns
+  may require pipeline/activity inspection outside this script. Use Get-AffectedServices.ps1
+  as the stage-2 reducer for a narrower likely affected/manual-review CSV.
 
 .PARAMETER SubscriptionId
   Optional. If supplied, scans only that subscription. Otherwise scans all accessible subscriptions.
@@ -385,6 +409,103 @@ function Normalize-Pna {
   return $PublicNetworkAccess
 }
 
+function Test-BypassIncludesAzureServices {
+  param([string]$Bypass)
+
+  if ([string]::IsNullOrWhiteSpace($Bypass)) { return $false }
+
+  # Resource providers may return comma/semicolon/space separated bypass values.
+  $tokens = $Bypass -split '[,; ]+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+  return [bool]($tokens | Where-Object { $_ -ieq "AzureServices" } | Select-Object -First 1)
+}
+
+function ConvertTo-YesNo {
+  param([bool]$Value)
+  if ($Value) { return "Y" }
+  return "N"
+}
+
+function Get-FactoryIdentitySummary {
+  param(
+    [string]$IdentityType,
+    $UserAssignedIdentities
+  )
+
+  $identityTypeText = if ([string]::IsNullOrWhiteSpace($IdentityType)) { "None" } else { $IdentityType }
+  $hasSystemAssigned = $identityTypeText -match 'SystemAssigned'
+  $hasUserAssigned = $identityTypeText -match 'UserAssigned'
+
+  if (-not $hasUserAssigned -and $null -ne $UserAssignedIdentities) {
+    if ($UserAssignedIdentities -is [string]) {
+      $hasUserAssigned = -not [string]::IsNullOrWhiteSpace($UserAssignedIdentities) -and $UserAssignedIdentities -ne "{}"
+    } else {
+      $props = @($UserAssignedIdentities.PSObject.Properties)
+      $hasUserAssigned = $props.Count -gt 0
+    }
+  }
+
+  return [pscustomobject]@{
+    Type              = $identityTypeText
+    HasSystemAssigned = ConvertTo-YesNo -Value $hasSystemAssigned
+    HasUserAssigned   = ConvertTo-YesNo -Value $hasUserAssigned
+  }
+}
+
+function Get-UsesManagedIdentity {
+  param(
+    [string]$AuthenticationType,
+    [string]$LinkedServiceType
+  )
+
+  # Best-effort and intentionally extensible: start with common authType values and
+  # leave connector-specific typeProperties inspection for a later, narrower pass.
+  if ([string]::IsNullOrWhiteSpace($AuthenticationType)) { return "?" }
+  if ($AuthenticationType -match '(?i)(managed|msi|systemassigned|userassigned)') { return "Y" }
+  if ($AuthenticationType -match '(?i)(anonymous|basic|accountkey|accesskey|sas|serviceprincipal|clientcertificate|sql|windows)') { return "N" }
+  return "?"
+}
+
+function Test-IsParameterizedValue {
+  param($Value)
+
+  if ($null -eq $Value) { return $false }
+
+  if ($Value -is [string]) {
+    return ($Value -match '^\s*@' -or $Value -match '@\{' -or $Value -match '(?i)linkedService\(\)\.parameters|parameters\(')
+  }
+
+  if ($Value.PSObject.Properties.Name -contains "type" -and $Value.type -match '(?i)Expression') {
+    return $true
+  }
+
+  return (($Value | ConvertTo-Json -Depth 20 -Compress) -match '(?i)Expression|@\{|linkedService\(\)\.parameters|parameters\(')
+}
+
+function Get-LinkedServiceTargetInfo {
+  param($TypeProperties)
+
+  if (-not $TypeProperties) {
+    return [pscustomobject]@{ Uri = $null; Status = "Unknown" }
+  }
+
+  foreach ($propName in @("url", "baseUrl", "serviceEndpoint")) {
+    $prop = $TypeProperties.PSObject.Properties[$propName]
+    if ($prop -and $null -ne $prop.Value) {
+      if (Test-IsParameterizedValue -Value $prop.Value) {
+        return [pscustomobject]@{ Uri = $null; Status = "Parameterized" }
+      }
+
+      return [pscustomobject]@{ Uri = [string]$prop.Value; Status = "Direct" }
+    }
+  }
+
+  if (Test-IsParameterizedValue -Value $TypeProperties) {
+    return [pscustomobject]@{ Uri = $null; Status = "Parameterized" }
+  }
+
+  return [pscustomobject]@{ Uri = $null; Status = "NotFound" }
+}
+
 function Get-IrClass {
   param($IrProps)
   # IR REST schema returns .properties.type and (for Azure-SSIS) .properties.typeProperties.ssisProperties.
@@ -406,10 +527,11 @@ function Build-ScenarioCategory {
 
   $cats = New-Object System.Collections.Generic.List[string]
 
-  # Connector-driven categories (match the Microsoft advisory wording)
+  # Connector-driven categories. These are linked-service signals only; pipeline/activity
+  # inspection is intentionally out of scope for this broad candidate report.
   if ($LinkedServiceType -eq "RestService")    { $cats.Add("REST_LinkedService$suffix") | Out-Null }
-  if ($LinkedServiceType -eq "Web")           { $cats.Add("Web_ActivityOrLS$suffix") | Out-Null }
-  if ($LinkedServiceType -eq "AzureFunction") { $cats.Add("AzureFunction_ActivityOrLS$suffix") | Out-Null }
+  if ($LinkedServiceType -eq "Web")           { $cats.Add("Web_LinkedServiceEvidence$suffix") | Out-Null }
+  if ($LinkedServiceType -eq "AzureFunction") { $cats.Add("AzureFunction_LinkedServiceEvidence$suffix") | Out-Null }
 
   # IR-driven categories
   if ($IrClass -eq "SelfHosted") { $cats.Add("SHIR$suffix") | Out-Null }
@@ -421,6 +543,42 @@ function Build-ScenarioCategory {
   }
 
   return ($cats -join ';')
+}
+
+function Get-RiskAssessment {
+  param(
+    [string]$TargetKind,
+    [string]$TrustedBypassEffective,
+    [string]$UsesManagedIdentity,
+    [string]$FactoryHasSystemAssignedMI,
+    [string]$IrClass,
+    [string]$LinkedServiceType
+  )
+
+  $reasonCodes = New-Object System.Collections.Generic.List[string]
+  $targetIsStorageOrKeyVault = $TargetKind -eq "Storage" -or $TargetKind -eq "KeyVault"
+
+  if ($targetIsStorageOrKeyVault) { $reasonCodes.Add("TargetIsStorageOrKeyVault") | Out-Null }
+  if ($TrustedBypassEffective -eq "Y") { $reasonCodes.Add("TrustedBypassEffective") | Out-Null }
+  if ($UsesManagedIdentity -eq "Y") { $reasonCodes.Add("LinkedServiceUsesManagedIdentity") | Out-Null }
+  if ($FactoryHasSystemAssignedMI -eq "Y") { $reasonCodes.Add("FactoryHasSystemAssignedMI") | Out-Null }
+  if ($IrClass -eq "SelfHosted") { $reasonCodes.Add("UsesSHIR") | Out-Null }
+  if ($IrClass -eq "AzureSSIS") { $reasonCodes.Add("UsesAzureSSIS") | Out-Null }
+  if ($LinkedServiceType -match '^(RestService|Web|AzureFunction)$') { $reasonCodes.Add("NeedsPipelineInspection") | Out-Null }
+
+  $hasMiEvidence = $UsesManagedIdentity -eq "Y" -or $FactoryHasSystemAssignedMI -eq "Y"
+  $riskLevel = "Low"
+  if ($targetIsStorageOrKeyVault -and $TrustedBypassEffective -eq "Y" -and $hasMiEvidence) {
+    $riskLevel = "High"
+  }
+  elseif ($targetIsStorageOrKeyVault -and $TrustedBypassEffective -eq "Y") {
+    $riskLevel = "Medium"
+  }
+
+  return [pscustomobject]@{
+    Level       = $riskLevel
+    ReasonCodes = ($reasonCodes -join ';')
+  }
 }
 
 function Invoke-ArmGetJson {
@@ -445,6 +603,27 @@ function Invoke-ArmGetJson {
   }
   if (-not $resp.Content) { return $null }
   return ($resp.Content | ConvertFrom-Json)
+}
+
+function Get-ArmPagedValues {
+  param([string]$Url)
+
+  $values = @()
+  $nextUrl = $Url
+
+  while ($nextUrl) {
+    $json = Invoke-ArmGetJson -Url $nextUrl
+    if ($json -and $json.value) {
+      $values += @($json.value)
+    }
+
+    $nextUrl = $null
+    if ($json -and $json.nextLink) {
+      $nextUrl = $json.nextLink
+    }
+  }
+
+  return $values
 }
 
 # ----------------------------
@@ -558,7 +737,9 @@ $adfQuery = @"
 Resources
 | where type =~ 'microsoft.datafactory/factories'
 | where subscriptionId in~ ('$(($subsToScan -join "','"))')
-| project subscriptionId, resourceGroup, name
+| project subscriptionId, resourceGroup, name,
+          identityType=tostring(identity.type),
+          userAssignedIdentities=identity.userAssignedIdentities
 | order by subscriptionId, resourceGroup, name
 "@
 
@@ -575,6 +756,7 @@ foreach ($f in $factories) {
   $subId = $f.subscriptionId
   $rg    = $f.resourceGroup
   $df    = $f.name
+  $factoryIdentity = Get-FactoryIdentitySummary -IdentityType $f.identityType -UserAssignedIdentities $f.userAssignedIdentities
 
   if ($AuthMode -eq "AzPowerShell") {
     # Set context per subscription so Invoke-AzRestMethod uses the right sub
@@ -589,13 +771,13 @@ foreach ($f in $factories) {
 
   # ADF Integration Runtimes - List By Factory [3](https://learn.microsoft.com/en-us/rest/api/datafactory/integration-runtimes/list-by-factory?view=rest-datafactory-2018-06-01)
   $irUrl = "https://management.azure.com/subscriptions/$subId/resourceGroups/$rg/providers/Microsoft.DataFactory/factories/$df/integrationRuntimes?api-version=$ApiVersion"
-  $irJson = Invoke-ArmGetJson -Url $irUrl
+  $irRows = Get-ArmPagedValues -Url $irUrl
 
   $irByName = @{}
   $irAllSummary = @()
 
-  if ($irJson -and $irJson.value) {
-    foreach ($ir in $irJson.value) {
+  if ($irRows) {
+    foreach ($ir in $irRows) {
       $irClass = Get-IrClass -IrProps $ir.properties
       $irByName[$ir.name] = $irClass
       $irAllSummary += ("{0}:{1}" -f $ir.name, (if ($ir.properties.type) { $ir.properties.type } else { "Unknown" }))
@@ -606,14 +788,15 @@ foreach ($f in $factories) {
 
   # ADF Linked Services - List By Factory 
   $lsUrl = "https://management.azure.com/subscriptions/$subId/resourceGroups/$rg/providers/Microsoft.DataFactory/factories/$df/linkedservices?api-version=$ApiVersion"
-  $lsJson = Invoke-ArmGetJson -Url $lsUrl
+  $lsRows = Get-ArmPagedValues -Url $lsUrl
 
-  if (-not $lsJson -or -not $lsJson.value) { continue }
+  if (-not $lsRows) { continue }
 
-  foreach ($ls in $lsJson.value) {
+  foreach ($ls in $lsRows) {
     $lsName = $ls.name
     $lsType = $ls.properties.type
     $authType = $ls.properties.typeProperties.authenticationType
+    $usesManagedIdentity = Get-UsesManagedIdentity -AuthenticationType $authType -LinkedServiceType $lsType
 
     # connectVia IR
     $connectVia = $ls.properties.connectVia.referenceName
@@ -622,12 +805,9 @@ foreach ($f in $factories) {
 
     # target URI best-effort (not all connectors expose it; parameterised LS may be blank)
     $tp = $ls.properties.typeProperties
-    $targetUri = $null
-    if ($tp) {
-      if ($tp.url) { $targetUri = $tp.url }
-      elseif ($tp.baseUrl) { $targetUri = $tp.baseUrl }
-      elseif ($tp.serviceEndpoint) { $targetUri = $tp.serviceEndpoint }
-    }
+    $targetInfo = Get-LinkedServiceTargetInfo -TypeProperties $tp
+    $targetUri = $targetInfo.Uri
+    $targetDetectionStatus = $targetInfo.Status
 
     $uriHost = Parse-HostFromUri -Uri $targetUri
     $targetKind = Classify-TargetKind -Hostname $uriHost
@@ -648,8 +828,9 @@ foreach ($f in $factories) {
         $targetDefaultAction = $entry.defaultAction
         $targetPna = Normalize-Pna -PublicNetworkAccess $entry.pna
 
-        $trustedConfigured = if ($targetBypass -and $targetBypass -ieq "AzureServices") { "Y" } else { "N" }
-        $trustedEffective  = if ($targetBypass -ieq "AzureServices" -and $targetPna -ine "Disabled" -and $targetDefaultAction -ieq "Deny") { "Y" } else { "N" }
+        $bypassIncludesAzureServices = Test-BypassIncludesAzureServices -Bypass $targetBypass
+        $trustedConfigured = if ($bypassIncludesAzureServices) { "Y" } else { "N" }
+        $trustedEffective  = if ($bypassIncludesAzureServices -and $targetPna -ine "Disabled" -and $targetDefaultAction -ieq "Deny") { "Y" } else { "N" }
       }
     }
     elseif ($targetKind -eq "KeyVault" -and $targetName) {
@@ -660,24 +841,37 @@ foreach ($f in $factories) {
         $targetDefaultAction = $entry.defaultAction
         $targetPna = Normalize-Pna -PublicNetworkAccess $entry.pna
 
-        $trustedConfigured = if ($targetBypass -and $targetBypass -ieq "AzureServices") { "Y" } else { "N" }
-        $trustedEffective  = if ($targetBypass -ieq "AzureServices" -and $targetPna -ine "Disabled" -and $targetDefaultAction -ieq "Deny") { "Y" } else { "N" }
+        $bypassIncludesAzureServices = Test-BypassIncludesAzureServices -Bypass $targetBypass
+        $trustedConfigured = if ($bypassIncludesAzureServices) { "Y" } else { "N" }
+        $trustedEffective  = if ($bypassIncludesAzureServices -and $targetPna -ine "Disabled" -and $targetDefaultAction -ieq "Deny") { "Y" } else { "N" }
       }
     }
 
     $scenarioCategory = Build-ScenarioCategory -LinkedServiceType $lsType -IrClass $connectViaClass -TargetKind $targetKind
+    $risk = Get-RiskAssessment `
+      -TargetKind $targetKind `
+      -TrustedBypassEffective $trustedEffective `
+      -UsesManagedIdentity $usesManagedIdentity `
+      -FactoryHasSystemAssignedMI $factoryIdentity.HasSystemAssigned `
+      -IrClass $connectViaClass `
+      -LinkedServiceType $lsType
 
     $report.Add([pscustomobject]@{
       subscriptionId             = $subId
       resourceGroup              = $rg
       factoryName                = $df
+      factoryIdentityType        = $factoryIdentity.Type
+      factoryHasSystemAssignedMI = $factoryIdentity.HasSystemAssigned
+      factoryHasUserAssignedMI   = $factoryIdentity.HasUserAssigned
       linkedServiceName          = $lsName
       linkedServiceType          = $lsType
       authType                   = $authType
+      usesManagedIdentity        = $usesManagedIdentity
       connectViaIR               = $connectViaIR
       connectViaIRClass          = $connectViaClass
       scenarioCategory           = $scenarioCategory
       targetUri                  = $targetUri
+      targetDetectionStatus      = $targetDetectionStatus
       targetKind                 = $targetKind
       targetName                 = $targetName
       targetPna                  = $targetPna
@@ -685,6 +879,8 @@ foreach ($f in $factories) {
       targetBypass               = $targetBypass
       trustedBypassConfigured    = $trustedConfigured
       trustedBypassEffective     = $trustedEffective
+      riskLevel                  = $risk.Level
+      reasonCodes                = $risk.ReasonCodes
       integrationRuntimesAll     = $irAllJoined
     }) | Out-Null
   }
