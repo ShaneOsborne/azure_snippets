@@ -12,7 +12,8 @@
   rather than treated as definitive proof of impact.
 
   Core keep logic:
-    - The target must be Storage or KeyVault.
+    - The target should be Storage/KeyVault, or the linked service type should strongly
+      indicate a Storage/KeyVault connector when direct target resolution is incomplete.
     - trustedBypassEffective = Y is the strongest bypass signal.
     - trustedBypassConfigured = Y can keep lower-confidence manual-review rows when other
       evidence is relevant.
@@ -22,12 +23,12 @@
       retain rows where MI evidence is incomplete.
 
   affectedConfidence values:
-    - High: Storage/KeyVault target + trusted bypass effective + linked service MI evidence
-      plus at least one strong factory/IR/scenario signal.
-    - Medium: Storage/KeyVault target + trusted bypass effective, but linked service MI
-      evidence is missing, negative, or uncertain while other relevance signals remain.
-    - Low: Storage/KeyVault target with trusted bypass configured/effective and enough
-      scenario or identity evidence to warrant manual review, but not enough for Medium.
+    - High: relevant Storage/KeyVault target or connector + trusted bypass effective +
+      linked service MI evidence plus at least one strong factory/IR/scenario/connector signal.
+    - Medium: relevant target/connector + trusted bypass effective, but linked service MI
+      evidence is missing, negative, uncertain, or weaker while other relevance signals remain.
+    - Low: relevant target/connector with trusted bypass configured/effective and enough
+      scenario, identity, or target-resolution evidence to warrant manual review.
 
   filterReasonCodes explains why a row was retained, for example:
     TrustedBypassEffective;UsesManagedIdentity;FactoryHasSystemAssignedMI;UsesSHIR;
@@ -85,6 +86,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+if (-not (Test-Path -LiteralPath $InputPath -PathType Leaf)) {
+  throw "Input CSV was not found: $InputPath. Run Get-AdfTrustedBypassRiskReport.ps1 first, or pass -InputPath with the correct file."
+}
+
 $csv = Import-Csv $InputPath
 
 function Get-RowValue {
@@ -106,6 +111,17 @@ function Test-Yes {
   return $Value -eq "Y"
 }
 
+function Get-ConfidenceSortOrder {
+  param([string]$Confidence)
+
+  switch ($Confidence) {
+    "High" { return 1 }
+    "Medium" { return 2 }
+    "Low" { return 3 }
+    default { return 9 }
+  }
+}
+
 function Get-AffectedEvaluation {
   param([Parameter(Mandatory=$true)]$Row)
 
@@ -119,9 +135,14 @@ function Get-AffectedEvaluation {
   $linkedServiceType = Get-RowValue -Row $Row -Name "linkedServiceType"
   $scenarioCategory = Get-RowValue -Row $Row -Name "scenarioCategory"
   $targetDetectionStatus = Get-RowValue -Row $Row -Name "targetDetectionStatus"
-  $stage1RiskLevel = Get-RowValue -Row $Row -Name "riskLevel"
-
   $targetIsStorageOrKeyVault = $targetKind -eq "Storage" -or $targetKind -eq "KeyVault"
+  $storageOrKvConnector = $linkedServiceType -match '^(AzureKeyVault|AzureBlobStorage|AzureBlobFS|AzureTableStorage|AzureQueueStorage|AzureFileStorage|AzureDataLakeStorage|AzureDataLakeStorageGen2)$'
+  $targetRelevant = $targetIsStorageOrKeyVault -or $storageOrKvConnector
+  $targetResolutionIncomplete =
+    $targetKind -eq "Unknown" -or
+    $targetDetectionStatus -eq "Parameterized" -or
+    $targetDetectionStatus -eq "NotFound" -or
+    $targetDetectionStatus -eq "Unknown"
   $trustedBypassIsEffective = Test-Yes -Value $trustedEffective
   $trustedBypassIsConfigured = Test-Yes -Value $trustedConfigured
   $lsUsesManagedIdentity = Test-Yes -Value $usesManagedIdentity
@@ -133,7 +154,6 @@ function Get-AffectedEvaluation {
   $restScenario = $linkedServiceType -eq "RestService" -or $scenarioCategory -match 'REST_LinkedService'
   $webLikeScenario = $linkedServiceType -eq "Web" -or $scenarioCategory -match 'Web_(LinkedServiceEvidence|ActivityOrLS)'
   $azureFunctionLikeScenario = $linkedServiceType -eq "AzureFunction" -or $scenarioCategory -match 'AzureFunction_(LinkedServiceEvidence|ActivityOrLS)'
-  $storageOrKvConnector = $linkedServiceType -match '^(AzureBlobFS|AzureBlobStorage|AzureTableStorage|AzureQueueStorage|AzureFileStorage|AzureKeyVault)$'
   $scenarioRelevant = $usesSHIR -or $usesAzureSSIS -or $restScenario -or $webLikeScenario -or $azureFunctionLikeScenario -or $storageOrKvConnector
 
   $reasonCodes = New-Object System.Collections.Generic.List[string]
@@ -153,15 +173,15 @@ function Get-AffectedEvaluation {
   if ($storageOrKvConnector) { $reasonCodes.Add("StorageOrKeyVaultConnector") | Out-Null }
   if ($targetDetectionStatus -eq "Parameterized") { $reasonCodes.Add("ParameterizedTarget") | Out-Null }
 
-  if (-not $targetIsStorageOrKeyVault) {
-    $excludeReasons.Add("Excluded because targetKind is '$targetKind', not Storage or KeyVault.") | Out-Null
+  if (-not $targetRelevant) {
+    $excludeReasons.Add("Excluded because targetKind is '$targetKind' and linkedServiceType '$linkedServiceType' does not indicate a Storage or KeyVault target.") | Out-Null
   }
 
   if (-not $trustedBypassIsEffective -and -not $trustedBypassIsConfigured) {
     $excludeReasons.Add("Excluded because trusted bypass is neither effective nor configured in the stage-1 report.") | Out-Null
   }
 
-  if (-not $scenarioRelevant -and -not $lsUsesManagedIdentity -and -not $factoryHasSystemAssigned -and $stage1RiskLevel -ne "High") {
+  if (-not $scenarioRelevant -and -not $lsUsesManagedIdentity -and -not $factoryHasSystemAssigned -and -not $factoryHasUserAssigned -and -not $targetResolutionIncomplete) {
     $excludeReasons.Add("Excluded because MI/scenario evidence is too weak for the stage-2 reducer.") | Out-Null
   }
 
@@ -174,13 +194,14 @@ function Get-AffectedEvaluation {
     $usesAzureSSIS -or
     $restScenario -or
     $webLikeScenario -or
-    $azureFunctionLikeScenario
+    $azureFunctionLikeScenario -or
+    $storageOrKvConnector
 
-  if ($targetIsStorageOrKeyVault -and $trustedBypassIsEffective -and $lsUsesManagedIdentity -and $strongScenarioOrFactorySignal) {
+  if ($targetRelevant -and $trustedBypassIsEffective -and $lsUsesManagedIdentity -and $strongScenarioOrFactorySignal) {
     $included = $true
     $confidence = "High"
   }
-  elseif ($targetIsStorageOrKeyVault -and $trustedBypassIsEffective -and ($scenarioRelevant -or $factoryHasSystemAssigned -or $stage1RiskLevel -eq "High")) {
+  elseif ($targetRelevant -and $trustedBypassIsEffective -and ($scenarioRelevant -or $factoryHasSystemAssigned -or $factoryHasUserAssigned)) {
     $included = $true
     $confidence = "Medium"
     if (-not $lsUsesManagedIdentity) {
@@ -190,7 +211,7 @@ function Get-AffectedEvaluation {
       $reasonCodes.Add("UserAssignedMINotStrongEvidence") | Out-Null
     }
   }
-  elseif ($targetIsStorageOrKeyVault -and ($trustedBypassIsEffective -or $trustedBypassIsConfigured) -and ($scenarioRelevant -or $lsUsesManagedIdentity -or $factoryHasSystemAssigned -or $factoryHasUserAssigned)) {
+  elseif ($targetRelevant -and ($trustedBypassIsEffective -or $trustedBypassIsConfigured) -and ($scenarioRelevant -or $lsUsesManagedIdentity -or $factoryHasSystemAssigned -or $factoryHasUserAssigned -or $targetResolutionIncomplete)) {
     $included = $true
     $confidence = "Low"
     $reasonCodes.Add("NeedsManualReview") | Out-Null
@@ -200,6 +221,10 @@ function Get-AffectedEvaluation {
     if ($factoryHasUserAssigned -and -not $factoryHasSystemAssigned) {
       $reasonCodes.Add("UserAssignedMINotStrongEvidence") | Out-Null
     }
+  }
+
+  if ($included -and $targetResolutionIncomplete) {
+    $reasonCodes.Add("NeedsManualReview") | Out-Null
   }
 
   $reasonText = if ($included) {
@@ -218,8 +243,19 @@ function Get-AffectedEvaluation {
   }
 }
 
-$explanation = @(foreach ($row in $csv) {
+$evaluatedRows = @(foreach ($row in $csv) {
   $evaluation = Get-AffectedEvaluation -Row $row
+
+  [pscustomobject]@{
+    Row        = $row
+    Evaluation = $evaluation
+    SortOrder  = Get-ConfidenceSortOrder -Confidence $evaluation.Confidence
+  }
+})
+
+$explanation = @(foreach ($item in $evaluatedRows) {
+  $row = $item.Row
+  $evaluation = $item.Evaluation
 
   [pscustomobject]@{
     included                  = $evaluation.Included
@@ -240,6 +276,7 @@ $explanation = @(foreach ($row in $csv) {
     scenarioCategory          = $row.scenarioCategory
     targetUri                 = $row.targetUri
     targetDetectionStatus     = $row.targetDetectionStatus
+    targetInventoryMatch      = $row.targetInventoryMatch
     targetKind                = $row.targetKind
     targetName                = $row.targetName
     trustedBypassConfigured   = $row.trustedBypassConfigured
@@ -252,11 +289,13 @@ $explanation = @(foreach ($row in $csv) {
   }
 })
 
-$affected = @(foreach ($row in $csv) {
-  $evaluation = Get-AffectedEvaluation -Row $row
+$affected = @(foreach ($item in $evaluatedRows) {
+  $row = $item.Row
+  $evaluation = $item.Evaluation
   if ($evaluation.Included -eq "Y") {
     [pscustomobject]@{
       affectedConfidence        = $evaluation.Confidence
+      affectedConfidenceSort    = $item.SortOrder
       filterReasonCodes         = $evaluation.FilterReasonCodes
       subscriptionId            = $row.subscriptionId
       resourceGroup             = $row.resourceGroup
@@ -273,6 +312,7 @@ $affected = @(foreach ($row in $csv) {
       scenarioCategory          = $row.scenarioCategory
       targetUri                 = $row.targetUri
       targetDetectionStatus     = $row.targetDetectionStatus
+      targetInventoryMatch      = $row.targetInventoryMatch
       targetKind                = $row.targetKind
       targetName                = $row.targetName
       targetPna                 = $row.targetPna
@@ -288,8 +328,11 @@ $affected = @(foreach ($row in $csv) {
 })
 
 try {
-  $affected | Export-Csv $OutputPath -NoTypeInformation
-  $explanation | Export-Csv $ExplanationPath -NoTypeInformation
+  $affected |
+    Select-Object * -ExcludeProperty affectedConfidenceSort |
+    Export-Csv $OutputPath -NoTypeInformation -Encoding UTF8
+
+  $explanation | Export-Csv $ExplanationPath -NoTypeInformation -Encoding UTF8
 }
 catch {
   throw "Could not write the output CSV. Close the file if it is open in Excel/VS Code and check write permissions. Original error: $($_.Exception.Message)"
@@ -308,6 +351,6 @@ if (-not $HideExplanations -and $affected.Count -eq 0 -and $explanation.Count -g
 }
 
 $affected |
-  Sort-Object affectedConfidence, subscriptionId, resourceGroup, factoryName |
+  Sort-Object affectedConfidenceSort, subscriptionId, resourceGroup, factoryName |
   Select-Object affectedConfidence, linkedServiceName, linkedServiceType, targetKind, trustedBypassEffective, usesManagedIdentity, filterReasonCodes |
   Format-Table -Wrap -AutoSize

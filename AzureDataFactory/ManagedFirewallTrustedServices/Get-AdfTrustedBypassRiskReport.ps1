@@ -26,12 +26,13 @@
       * factoryIdentityType, factoryHasSystemAssignedMI, factoryHasUserAssignedMI
       * usesManagedIdentity, derived best-effort from linked service authenticationType
       * targetDetectionStatus: Direct, Parameterized, NotFound, or Unknown
+      * targetInventoryMatch: whether a direct Storage/Key Vault target matched inventory
       * trustedBypassConfigured and trustedBypassEffective
       * riskLevel and reasonCodes
 
   riskLevel is conservative:
-      * High: Storage/KeyVault target + trusted bypass effective + managed identity evidence
-      * Medium: Storage/KeyVault target + trusted bypass effective, but MI evidence is incomplete
+      * High: Storage/KeyVault target + trusted bypass effective + linked service MI evidence
+      * Medium: Storage/KeyVault target + trusted bypass effective, but linked service MI evidence is incomplete
       * Low: broader candidate signal or incomplete evidence
 
   Parameterized targets, REST/Web/AzureFunction-style linked service signals, and IR patterns
@@ -552,11 +553,17 @@ function Get-RiskAssessment {
     [string]$UsesManagedIdentity,
     [string]$FactoryHasSystemAssignedMI,
     [string]$IrClass,
-    [string]$LinkedServiceType
+    [string]$LinkedServiceType,
+    [string]$TargetDetectionStatus
   )
 
   $reasonCodes = New-Object System.Collections.Generic.List[string]
   $targetIsStorageOrKeyVault = $TargetKind -eq "Storage" -or $TargetKind -eq "KeyVault"
+  $hasScenarioOrIrEvidence =
+    $FactoryHasSystemAssignedMI -eq "Y" -or
+    $IrClass -eq "SelfHosted" -or
+    $IrClass -eq "AzureSSIS" -or
+    $LinkedServiceType -match '^(RestService|Web|AzureFunction)$'
 
   if ($targetIsStorageOrKeyVault) { $reasonCodes.Add("TargetIsStorageOrKeyVault") | Out-Null }
   if ($TrustedBypassEffective -eq "Y") { $reasonCodes.Add("TrustedBypassEffective") | Out-Null }
@@ -565,19 +572,19 @@ function Get-RiskAssessment {
   if ($IrClass -eq "SelfHosted") { $reasonCodes.Add("UsesSHIR") | Out-Null }
   if ($IrClass -eq "AzureSSIS") { $reasonCodes.Add("UsesAzureSSIS") | Out-Null }
   if ($LinkedServiceType -match '^(RestService|Web|AzureFunction)$') { $reasonCodes.Add("NeedsPipelineInspection") | Out-Null }
+  if ($TargetDetectionStatus -eq "Parameterized") { $reasonCodes.Add("NeedsPipelineInspection") | Out-Null }
 
-  $hasMiEvidence = $UsesManagedIdentity -eq "Y" -or $FactoryHasSystemAssignedMI -eq "Y"
   $riskLevel = "Low"
-  if ($targetIsStorageOrKeyVault -and $TrustedBypassEffective -eq "Y" -and $hasMiEvidence) {
+  if ($targetIsStorageOrKeyVault -and $TrustedBypassEffective -eq "Y" -and $UsesManagedIdentity -eq "Y") {
     $riskLevel = "High"
   }
-  elseif ($targetIsStorageOrKeyVault -and $TrustedBypassEffective -eq "Y") {
+  elseif ($targetIsStorageOrKeyVault -and $TrustedBypassEffective -eq "Y" -and $hasScenarioOrIrEvidence) {
     $riskLevel = "Medium"
   }
 
   return [pscustomobject]@{
     Level       = $riskLevel
-    ReasonCodes = ($reasonCodes -join ';')
+    ReasonCodes = (($reasonCodes | Select-Object -Unique) -join ';')
   }
 }
 
@@ -819,10 +826,12 @@ foreach ($f in $factories) {
     $targetBypass = ""
     $trustedConfigured = "?"
     $trustedEffective  = "?"
+    $targetInventoryMatch = "N"
 
     if ($targetKind -eq "Storage" -and $targetName) {
       $k = $targetName.ToLowerInvariant()
       if ($storageMap.ContainsKey($k)) {
+        $targetInventoryMatch = "Y"
         $entry = $storageMap[$k]
         $targetBypass = $entry.bypass
         $targetDefaultAction = $entry.defaultAction
@@ -836,6 +845,7 @@ foreach ($f in $factories) {
     elseif ($targetKind -eq "KeyVault" -and $targetName) {
       $k = $targetName.ToLowerInvariant()
       if ($kvMap.ContainsKey($k)) {
+        $targetInventoryMatch = "Y"
         $entry = $kvMap[$k]
         $targetBypass = $entry.bypass
         $targetDefaultAction = $entry.defaultAction
@@ -854,7 +864,8 @@ foreach ($f in $factories) {
       -UsesManagedIdentity $usesManagedIdentity `
       -FactoryHasSystemAssignedMI $factoryIdentity.HasSystemAssigned `
       -IrClass $connectViaClass `
-      -LinkedServiceType $lsType
+      -LinkedServiceType $lsType `
+      -TargetDetectionStatus $targetDetectionStatus
 
     $report.Add([pscustomobject]@{
       subscriptionId             = $subId
@@ -872,6 +883,7 @@ foreach ($f in $factories) {
       scenarioCategory           = $scenarioCategory
       targetUri                  = $targetUri
       targetDetectionStatus      = $targetDetectionStatus
+      targetInventoryMatch       = $targetInventoryMatch
       targetKind                 = $targetKind
       targetName                 = $targetName
       targetPna                  = $targetPna
