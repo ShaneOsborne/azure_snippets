@@ -581,6 +581,9 @@ function Get-RiskAssessment {
   elseif ($targetIsStorageOrKeyVault -and $TrustedBypassEffective -eq "Y" -and $hasScenarioOrIrEvidence) {
     $riskLevel = "Medium"
   }
+  elseif ($targetIsStorageOrKeyVault -and $TrustedBypassEffective -eq "Y") {
+    $riskLevel = "Medium"
+  }
 
   return [pscustomobject]@{
     Level       = $riskLevel

@@ -220,3 +220,8 @@ Custom explanation output:
 - Azure CLI and Az PowerShell maintain separate login/context caches. The default PowerShell report mode uses Azure CLI context.
 - If a CSV cannot be overwritten, close it in Excel, VS Code, or any other app that may have locked the file.
 - Confirm findings against your environment and security requirements before remediation.
+
+## Guidance and Documentation
+
+- [GUIDANCE.md](./GUIDANCE.md) – Comprehensive guidance on interpreting results, prioritizing reviews, remediation workflows, and best practices
+- [LIMITATIONS.md](./LIMITATIONS.md) – Detailed discussion of known limitations, design trade-offs, and scope constraints
