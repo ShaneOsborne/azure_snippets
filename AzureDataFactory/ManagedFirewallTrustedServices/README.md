@@ -77,6 +77,16 @@ Optional Az PowerShell mode:
   -AuthMode AzPowerShell
 ```
 
+To pin Az PowerShell mode to a specific account:
+
+```powershell
+./Get-AdfTrustedBypassRiskReport.ps1 `
+  -SubscriptionId "00000000-0000-0000-0000-000000000000" `
+  -TenantId "11111111-1111-1111-1111-111111111111" `
+  -AccountId "user@contoso.com" `
+  -AuthMode AzPowerShell
+```
+
 ### 2) Filter To Affected Services
 
 ```powershell

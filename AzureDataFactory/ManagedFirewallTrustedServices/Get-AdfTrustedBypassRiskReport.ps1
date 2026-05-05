@@ -3,11 +3,12 @@
   Produces an ADF security advisory risk report across one subscription or all accessible subscriptions.
 
 .DESCRIPTION
-  - Uses Azure Resource Graph (Search-AzGraph) to inventory:
+  - Uses Azure Resource Graph to inventory:
       * Storage accounts: networkAcls.bypass, networkAcls.defaultAction, publicNetworkAccess
       * Key Vaults:      networkAcls.bypass, networkAcls.defaultAction, publicNetworkAccess
       * Data Factories
-    (Search-AzGraph supports subscription scope or tenant scope and includes paging support via SkipToken) [1](https://learn.microsoft.com/en-us/powershell/module/az.resourcegraph/search-azgraph?view=azps-15.4.0)[2](https://learn.microsoft.com/en-us/azure/governance/resource-graph/first-query-powershell)
+    Default AuthMode uses Azure CLI and the Resource Graph REST endpoint.
+    AzPowerShell mode uses Search-AzGraph.
 
   - Uses Azure Data Factory REST APIs:
       * Linked Services - List By Factory (api-version 2018-06-01) 
@@ -17,8 +18,8 @@
   Optional. If supplied, scans only that subscription. Otherwise scans all accessible subscriptions.
 
 .PARAMETER TenantId
-  Optional. Use with SubscriptionId to sign in directly to the tenant that owns the subscription.
-  This avoids Az.Accounts trying to populate contexts for other tenants.
+  Optional. Validates that Azure CLI is using the expected tenant when AuthMode is AzureCli.
+  In AzPowerShell mode, it is passed to Connect-AzAccount / Set-AzContext.
 
 .PARAMETER AccountId
   Optional. User principal name/account to use for Connect-AzAccount when AuthMode is AzPowerShell.
@@ -32,7 +33,7 @@
 
 .EXAMPLE
   .\Get-AdfTrustedBypassRiskReport.ps1
-  Scans all subscriptions you can access and writes .\adf_risk_report_v3_pwsh.csv
+  Uses the current Azure CLI account, scans all enabled Azure CLI subscriptions, and writes .\adf_risk_report_v3_pwsh.csv
 
 .EXAMPLE
   .\Get-AdfTrustedBypassRiskReport.ps1 -SubscriptionId "00000000-0000-0000-0000-000000000000" -OutputPath "C:\temp\adf.csv"
@@ -41,7 +42,7 @@
   .\Get-AdfTrustedBypassRiskReport.ps1 -SubscriptionId "00000000-0000-0000-0000-000000000000" -TenantId "11111111-1111-1111-1111-111111111111"
 
 .EXAMPLE
-  .\Get-AdfTrustedBypassRiskReport.ps1 -SubscriptionId "00000000-0000-0000-0000-000000000000" -TenantId "11111111-1111-1111-1111-111111111111" -AccountId "user@contoso.com"
+  .\Get-AdfTrustedBypassRiskReport.ps1 -SubscriptionId "00000000-0000-0000-0000-000000000000" -TenantId "11111111-1111-1111-1111-111111111111" -AccountId "user@contoso.com" -AuthMode AzPowerShell
 #>
 
 param(
@@ -314,8 +315,8 @@ function Invoke-AzureCliResourceGraph {
 
 function Get-AllAzGraph {
   <#
-    Executes a Search-AzGraph query across provided subscriptions, handling paging via SkipToken.
-    Search-AzGraph supports -Subscription and -SkipToken for pagination. [1](https://learn.microsoft.com/en-us/powershell/module/az.resourcegraph/search-azgraph?view=azps-15.4.0)
+    Executes an Azure Resource Graph query across provided subscriptions.
+    AzureCli mode uses the Resource Graph REST endpoint. AzPowerShell mode uses Search-AzGraph.
   #>
   param(
     [Parameter(Mandatory=$true)][string]$Query,

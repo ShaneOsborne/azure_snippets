@@ -9,6 +9,8 @@
     - scenarioCategory matches one of: SHIR, AzureSSIS, REST_LinkedService, Web_ActivityOrLS, AzureFunction_ActivityOrLS
 
   Results are exported to a CSV and displayed as a formatted table.
+  A separate explanation CSV is also written so excluded rows have a user-friendly reason.
+  Use -HideExplanations to suppress the console explanation table when no affected rows are found.
 
 .PARAMETER InputPath
   Path to the source risk report CSV (output of Get-AdfTrustedBypassRiskReport.ps1).
@@ -31,6 +33,10 @@
 
 .EXAMPLE
   .\Get-AffectedServices.ps1 -InputPath "C:\temp\MCAPS.csv" -OutputPath "C:\temp\affected.csv"
+
+.EXAMPLE
+  .\Get-AffectedServices.ps1 -HideExplanations
+  Writes the affected and explanation CSV files without printing the no-match explanation table.
 #>
 
 param(
