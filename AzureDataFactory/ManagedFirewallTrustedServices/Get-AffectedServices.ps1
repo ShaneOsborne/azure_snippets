@@ -155,6 +155,9 @@ function Get-AffectedEvaluation {
   $webLikeScenario = $linkedServiceType -eq "Web" -or $scenarioCategory -match 'Web_(LinkedServiceEvidence|ActivityOrLS)'
   $azureFunctionLikeScenario = $linkedServiceType -eq "AzureFunction" -or $scenarioCategory -match 'AzureFunction_(LinkedServiceEvidence|ActivityOrLS)'
   $scenarioRelevant = $usesSHIR -or $usesAzureSSIS -or $restScenario -or $webLikeScenario -or $azureFunctionLikeScenario -or $storageOrKvConnector
+  $manualReviewTargetRelevant =
+    $targetRelevant -or
+    ($targetResolutionIncomplete -and ($usesSHIR -or $usesAzureSSIS -or $restScenario -or $webLikeScenario -or $azureFunctionLikeScenario))
 
   $reasonCodes = New-Object System.Collections.Generic.List[string]
   $excludeReasons = New-Object System.Collections.Generic.List[string]
@@ -173,7 +176,7 @@ function Get-AffectedEvaluation {
   if ($storageOrKvConnector) { $reasonCodes.Add("StorageOrKeyVaultConnector") | Out-Null }
   if ($targetDetectionStatus -eq "Parameterized") { $reasonCodes.Add("ParameterizedTarget") | Out-Null }
 
-  if (-not $targetRelevant) {
+  if (-not $manualReviewTargetRelevant) {
     $excludeReasons.Add("Excluded because targetKind is '$targetKind' and linkedServiceType '$linkedServiceType' does not indicate a Storage or KeyVault target.") | Out-Null
   }
 
@@ -211,7 +214,7 @@ function Get-AffectedEvaluation {
       $reasonCodes.Add("UserAssignedMINotStrongEvidence") | Out-Null
     }
   }
-  elseif ($targetRelevant -and ($trustedBypassIsEffective -or $trustedBypassIsConfigured) -and ($scenarioRelevant -or $lsUsesManagedIdentity -or $factoryHasSystemAssigned -or $factoryHasUserAssigned -or $targetResolutionIncomplete)) {
+  elseif ($manualReviewTargetRelevant -and ($trustedBypassIsEffective -or $trustedBypassIsConfigured) -and ($scenarioRelevant -or $lsUsesManagedIdentity -or $factoryHasSystemAssigned -or $factoryHasUserAssigned -or $targetResolutionIncomplete)) {
     $included = $true
     $confidence = "Low"
     $reasonCodes.Add("NeedsManualReview") | Out-Null
