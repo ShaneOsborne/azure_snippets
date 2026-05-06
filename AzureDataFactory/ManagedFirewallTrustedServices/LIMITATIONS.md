@@ -1,122 +1,107 @@
-# Known Limitations
+# Known Limitations and Why Manual Review Is Still Required
 
-These scripts are intentionally designed as a **two‑stage discovery and reduction workflow**. They trade completeness for safety and scalability, particularly in large or regulated environments. The following limitations are known and expected.
+These scripts are designed to **support discovery, prioritization, and manual review** for the Azure Data Factory managed identity + trusted services firewall bypass retirement scenario. They are intended to reduce blind spots and focus engineering effort, but they are **not designed to provide definitive proof of runtime impact**.
 
----
+The reason is that this scenario depends on a combination of factors that are **not always visible from static metadata alone**, including:
 
-## 1. Best‑effort linked service managed identity detection
-
-Managed identity usage is inferred primarily from linked service–level `authenticationType` values. Connector‑specific deep inspection of `typeProperties` is intentionally out of scope.
-
-As a result:
-
-- Some connectors may use managed identity implicitly or via properties not exposed in a consistent way.
-- `usesManagedIdentity = Y` should be treated as **strong but not definitive** evidence.
-- Missing or uncertain MI evidence may still require manual review in stage 2.
+- Whether a linked service is actually used by active pipelines
+- Whether a target endpoint is resolved dynamically at runtime
+- Whether managed identity is truly the authentication path in use
+- Whether the target resource is actually relying on trusted services bypass
+- Whether the configuration belongs to a live production workload or only exists as legacy, test, or unused configuration
 
 ---
 
-## 2. Target resolution may be incomplete
+## What the Scripts Can Do Reliably
 
-Target URIs are derived only from common fields such as:
+The scripts are effective at **correlating available control-plane metadata** across Azure Data Factory, Azure Resource Graph, Storage accounts, and Key Vaults. In practice, they can reliably surface:
 
-- `url`
-- `baseUrl`
-- `serviceEndpoint`
+- Factories with system-assigned or user-assigned managed identity
+- Linked services and integration runtimes
+- Common Storage and Key Vault target patterns
+- Trusted services firewall bypass configuration
+- Parameterized or unresolved targets that need deeper inspection
+- Conservative confidence signals to help prioritize review effort
 
-Limitations include:
-
-- Parameterized linked services may not expose a resolvable target at discovery time.
-- Some connectors do not surface a clear endpoint suitable for hostname extraction.
-- `targetDetectionStatus = Parameterized`, `NotFound`, or `Unknown` indicates incomplete resolution and should be reviewed manually if other signals are present.
-
----
-
-## 3. Inventory matching is name‑based only
-
-`targetInventoryMatch` is determined by matching the derived hostname to:
-
-- Storage account names
-- Key Vault names
-
-This approach does not:
-
-- Follow private endpoints
-- Resolve DNS aliases
-- Handle cross‑tenant or externally hosted endpoints
-- Validate that the resolved target is the *intended* runtime target used by pipelines
-
-A positive inventory match indicates **correlation**, not guaranteed runtime usage.
+This makes the scripts **useful for estate-wide discovery and triage**, especially where manually inspecting every factory would be impractical.
 
 ---
 
-## 4. No pipeline or activity inspection
+## Known Limitations
 
-Neither script inspects:
+### Best-effort managed identity detection
 
-- Pipelines
-- Activities
+Managed identity usage is inferred primarily from linked service `authenticationType`. Some connectors may use MI implicitly or via properties not surfaced consistently. **Results indicate likelihood, not proof.**
+
+### Incomplete target resolution
+
+Target URIs are derived from common fields only (`url`, `baseUrl`, `serviceEndpoint`). Parameterized or implicit targets may not resolve at discovery time and are flagged for manual review.
+
+### Name-based inventory matching
+
+`targetInventoryMatch` is based on matching derived hostnames to Storage or Key Vault names. This does not account for:
+
+- Private endpoints
+- DNS aliases
+- Custom domains
+- Runtime redirection
+
+### No pipeline or activity inspection
+
+Pipelines, activities, datasets, and expressions are not inspected. Scenarios such as REST, Web, Azure Function, or parameterized linked services may require follow-up analysis.
+
+### Conservative, advisory classification
+
+`riskLevel` and stage-2 confidence values are **prioritization aids only**. They should not be treated as definitive impact assessments or compliance attestations.
+
+### Non-exhaustive connector coverage
+
+Only common Storage and Key Vault–related linked service types are explicitly recognized. Unrecognized connectors may require manual interpretation.
+
+### Subscription-scoped visibility
+
+Discovery relies on Azure Resource Graph visibility in the scanned subscriptions. Cross-tenant or externally hosted targets are not validated.
+
+---
+
+## Why This Cannot Be Fully Automated
+
+Even with improvements such as inventory matching, confidence scoring, and parameterized target detection, the scripts do not inspect:
+
+- Pipeline definitions
+- Activity-level behavior
 - Dataset bindings
-- Runtime expressions
+- Runtime parameter values
+- Trigger-driven variations
+- Environment-specific overrides
+- Whether a linked service is currently unused
 
-Consequently:
+Because of that, some rows may still represent:
 
-- Actual runtime behavior is not validated.
-- REST, Web, AzureFunction, and parameterized scenarios are flagged conservatively using `NeedsPipelineInspection`.
-- Stage‑2 results should be treated as **likely affected or manual‑review candidates**, not proof of impact.
+**False positives** – configurations that look relevant but are not actually exercised at runtime
 
----
+**False negatives** – cases where the real target or authentication path is only visible through dynamic expressions or activity-level logic
 
-## 5. Risk levels are conservative and contextual
+A **human reviewer can inspect runtime intent and architectural context** in ways that static analysis cannot. In particular, manual review can confirm:
 
-The `riskLevel` field in stage 1 is a **prioritization aid**, not a definitive classification.
-
-In particular:
-
-- `High` requires explicit linked service MI evidence.
-- `Medium` reflects trusted bypass with partial or indirect supporting evidence.
-- `Low` represents broad candidate discovery.
-
-Downstream decisions should rely on the **stage‑2 confidence classification** combined with human review.
+- Whether the linked service is referenced by live pipelines
+- Whether parameterized endpoints resolve to Storage or Key Vault at runtime
+- Whether managed identity is truly the execution path being used
+- Whether another supported network path is already in place
+- What the real remediation priority is for the workload
 
 ---
 
-## 6. Connector coverage is not exhaustive
+## Recommended Interpretation
 
-Only commonly observed Storage and Key Vault–related linked service types are explicitly recognized. New or uncommon connectors may:
+These scripts should be treated as **decision-support tools, not automated proof engines**.
 
-- Appear as `targetKind = Unknown`
-- Require manual interpretation
-- Still be retained as Low confidence if scenario evidence exists
+The intended operating model is:
 
----
+1. **Stage 1** – Use `Get-AdfTrustedBypassRiskReport.ps1` to identify broad candidates.
 
-## 7. Cross‑subscription and cross‑tenant paths
+2. **Stage 2** – Use `Get-AffectedServices.ps1` to reduce the result set into likely affected or manual-review rows.
 
-The scripts assume:
+3. **Human validation** – Inspect pipelines, activities, and runtime design where needed before deciding whether remediation is required.
 
-- Visibility via Azure Resource Graph in the scanned subscriptions
-- Inventory targets reside in accessible subscriptions
-
-They do not:
-
-- Traverse external tenants
-- Validate trust boundaries
-- Confirm effective permissions at runtime
-
----
-
-## 8. Output is advisory, not compliance attestation
-
-These scripts are intended to support:
-
-- Discovery
-- Triage
-- Prioritization
-- Manual review workflows
-
-They should **not** be used as:
-
-- Formal compliance attestations
-- Automated enforcement mechanisms
-- Proof of actual data exfiltration or runtime access
+This allows **automation to do what it does best** — scale discovery and reduce blind spots — while leaving **final confirmation to engineering review** where runtime behavior is dynamic or context-dependent.
