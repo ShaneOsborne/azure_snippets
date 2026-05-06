@@ -455,12 +455,33 @@ function Get-FactoryIdentitySummary {
 function Get-UsesManagedIdentity {
   param(
     [string]$AuthenticationType,
-    [string]$LinkedServiceType
+    [string]$LinkedServiceType,
+    [string]$CredentialType,
+    $TypeProperties
   )
 
   # Best-effort and intentionally extensible: start with common authType values and
   # leave connector-specific typeProperties inspection for a later, narrower pass.
-  if ([string]::IsNullOrWhiteSpace($AuthenticationType)) { return "?" }
+  if ([string]::IsNullOrWhiteSpace($AuthenticationType)) {
+    # Newer linked service patterns can rely on a Credential reference where
+    # authenticationType is omitted from typeProperties.
+    if ($CredentialType -match '(?i)(managed|msi|systemassigned|userassigned)') { return "Y" }
+    if ($CredentialType -match '(?i)(serviceprincipal|clientcertificate|certificate|secret|sas|accesskey|accountkey|sql|windows)') { return "N" }
+
+    # If auth is omitted, infer from explicit non-MI properties first.
+    if ($TypeProperties) {
+      $tpNames = @($TypeProperties.PSObject.Properties.Name | ForEach-Object { [string]$_ })
+      if ($tpNames -match '(?i)connectionstring|accountkey|accesskey|sas(uri|token)?|password|secret|serviceprincipal|clientsecret|clientcertificate|username|userName') {
+        return "N"
+      }
+    }
+
+    # For common connectors where authType may be omitted in older linked service
+    # payloads, treat missing auth markers as implicit MI.
+    if ($LinkedServiceType -match '(?i)AzureBlobFS|AzureKeyVault') { return "Y" }
+
+    return "?"
+  }
   if ($AuthenticationType -match '(?i)(managed|msi|systemassigned|userassigned)') { return "Y" }
   if ($AuthenticationType -match '(?i)(anonymous|basic|accountkey|accesskey|sas|serviceprincipal|clientcertificate|sql|windows)') { return "N" }
   return "?"
@@ -796,6 +817,24 @@ foreach ($f in $factories) {
 
   $irAllJoined = ($irAllSummary -join ';')
 
+  # ADF Credentials - List By Factory (used for MI inference when linked service
+  # authenticationType is omitted and a credential reference is used)
+  $credUrl = "https://management.azure.com/subscriptions/$subId/resourceGroups/$rg/providers/Microsoft.DataFactory/factories/$df/credentials?api-version=$ApiVersion"
+  $credRows = @()
+  try {
+    $credRows = Get-ArmPagedValues -Url $credUrl
+  }
+  catch {
+    $credRows = @()
+  }
+
+  $credByName = @{}
+  if ($credRows) {
+    foreach ($cred in $credRows) {
+      $credByName[$cred.name] = [string]$cred.properties.type
+    }
+  }
+
   # ADF Linked Services - List By Factory 
   $lsUrl = "https://management.azure.com/subscriptions/$subId/resourceGroups/$rg/providers/Microsoft.DataFactory/factories/$df/linkedservices?api-version=$ApiVersion"
   $lsRows = Get-ArmPagedValues -Url $lsUrl
@@ -806,7 +845,14 @@ foreach ($f in $factories) {
     $lsName = $ls.name
     $lsType = $ls.properties.type
     $authType = $ls.properties.typeProperties.authenticationType
-    $usesManagedIdentity = Get-UsesManagedIdentity -AuthenticationType $authType -LinkedServiceType $lsType
+
+    $credentialRefName = ""
+    if ($ls.properties.typeProperties -and $ls.properties.typeProperties.PSObject.Properties.Name -contains "credential") {
+      $credentialRefName = [string]$ls.properties.typeProperties.credential.referenceName
+    }
+    $credentialType = if ($credentialRefName -and $credByName.ContainsKey($credentialRefName)) { $credByName[$credentialRefName] } else { "" }
+
+    $usesManagedIdentity = Get-UsesManagedIdentity -AuthenticationType $authType -LinkedServiceType $lsType -CredentialType $credentialType -TypeProperties $ls.properties.typeProperties
 
     # connectVia IR
     $connectVia = $ls.properties.connectVia.referenceName
